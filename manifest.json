@@ -1,0 +1,21 @@
+{
+  "name": "Timeline Scheduler",
+  "short_name": "Timeline",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#f7f8fb",
+  "theme_color": "#2563eb",
+  "description": "A local timeline scheduler with best-effort notifications and Android native timer helper.",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

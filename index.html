@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Timeline Scheduler — PWA Enhanced</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#2563eb"/>
+<style>
+  :root{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;line-height:1.35}
+  body{max-width:980px;margin:20px auto;padding:18px;background:#f7f8fb;color:#111;border-radius:10px;box-shadow:0 6px 18px rgba(11,22,40,0.06)}
+  h1{margin:0 0 10px;font-size:20px}
+  .row{display:flex;gap:8px;align-items:center}
+  input,button,textarea,select{font-size:14px;padding:8px;border:1px solid #d6d9e6;border-radius:6px;background:white}
+  input[type=datetime-local]{padding:6px 8px}
+  button{cursor:pointer;background:#2563eb;color:white;border:none}
+  button.ghost{background:transparent;color:#374151;border:1px solid #e6e9f2}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 18px}
+  .task{background:white;padding:10px;border-radius:8px;margin:8px 0;display:flex;align-items:center;justify-content:space-between;border:1px solid #eef2ff}
+  .task .meta{display:flex;gap:12px;align-items:center}
+  .small{font-size:13px;color:#6b7280}
+  .timeline{margin-top:12px}
+  .muted{color:#6b7280}
+  .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:center}
+  .full{grid-column:1/-1}
+  .actions{display:flex;gap:6px}
+  .danger{background:#ef4444}
+  footer{margin-top:18px;color:#6b7280;font-size:13px}
+  .toast{position:fixed;right:18px;bottom:18px;background:#111;color:white;padding:10px 14px;border-radius:8px;opacity:0;transform:translateY(10px);transition:all .25s ease}
+  .toast.show{opacity:1;transform:translateY(0)}
+  .note-row{display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid #f0f2f7}
+  .pin{background:#f3e8ff;color:#6b21a8;padding:6px 8px;border-radius:6px;border:none}
+  .countdown{font-weight:600}
+  .install-btn{background:#10b981}
+  @media (max-width:640px){.form-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<h1>Timeline Scheduler (PWA)</h1>
+<p class="muted">Now with PWA manifest and a service-worker. Notifications are best-effort — see notes below. For native phone timer on Android, use the "Open native timer" action after pressing Start.</p>
+
+<div style="background:#fff;padding:12px;border-radius:8px;border:1px solid #eef2ff">
+  <div class="form-grid">
+    <label>Title <input id="title" placeholder="Study for math..." /></label>
+    <label>Start <input id="start" type="datetime-local" /></label>
+    <label>End <input id="end" type="datetime-local" /></label>
+    <label class="full">Insert after (optional)
+      <select id="insertAfter"><option value="">(append at end)</option></select>
+    </label>
+    <div class="full row" style="justify-content:flex-end">
+      <button id="addBtn">Add task</button>
+      <button id="clearAll" class="ghost" style="margin-left:6px">Clear all</button>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+  <label style="display:flex;gap:8px;align-items:center">
+    Delay (minutes):
+    <input id="delay" type="number" min="0" style="width:100px" />
+  </label>
+  <div style="display:flex;gap:6px;align-items:center">
+    <button id="delayAll" class="ghost">Apply to ALL tasks (incl. past)</button>
+    <button id="delayUpcoming">Apply to upcoming (extend running)</button>
+  </div>
+  <span class="muted" style="margin-left:8px">If a task is running and you choose upcoming, only its end will be extended. Pinned tasks are skipped.</span>
+</div>
+
+
+<div style="margin-top:10px;padding:10px;background:#fff;border-radius:8px;border:1px solid #eef2ff">
+  <h3 style="margin:0 0 8px">Background notifications — Trigger API helper</h3>
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <button id="btnCheckTrigger" class="ghost">Check Trigger API support</button>
+    <button id="btnScheduleTriggers">Schedule all notifications (try Trigger API)</button>
+    <button id="btnCancelTriggers" class="ghost">Cancel scheduled (SW)</button>
+    <span id="triggerStatus" class="muted" style="margin-left:8px">Support: unknown</span>
+  </div>
+  <p class="muted" style="margin-top:8px">Note: If your browser supports Notification Triggers (experimental), the service worker will schedule notifications that may fire while the app is closed. Otherwise this attempts a best-effort fallback. Best results on Chrome for Android with experimental features enabled.</p>
+</div>
+
+
+<div class="timeline" id="timeline"></div>
+
+<hr />
+<h2>Notebook</h2>
+<div style="background:#fff;padding:12px;border-radius:8px;border:1px solid #eef2ff;margin-bottom:12px">
+  <div class="row" style="gap:8px">
+    <input type="date" id="noteDate" />
+    <input id="noteText" placeholder="Take quick note..." style="flex:1" />
+    <button id="addNote">Add note</button>
+  </div>
+  <div id="notesList" style="margin-top:12px"></div>
+</div>
+
+<footer>Tip: Use insert-after to put a new task between two tasks — later tasks will shift automatically (unless pinned). Note: due to web platform limits, scheduled notifications are best-effort and may not fire if the browser is killed.</footer>
+
+<div id="toast" class="toast"></div>
+
+<script>
+(function(){
+  const LS_KEY = 'timeline_scheduler_tasks_v2';
+  const NOTES_KEY = 'timeline_scheduler_notes_v1';
+
+  function uid(){ return Math.floor(Math.random()*1e9).toString(36) + Date.now().toString(36) }
+  function now(){ return Date.now(); }
+
+  // task structure: {id,title,start,end,pinned:boolean}
+  function loadTasks(){ try{ return JSON.parse(localStorage.getItem(LS_KEY)||'[]') }catch(e){return[]} }
+  function saveTasks(tasks){ localStorage.setItem(LS_KEY, JSON.stringify(tasks)); render(); showToast('Saved'); scheduleNotifications(); }
+
+  function loadNotes(){ try{ return JSON.parse(localStorage.getItem(NOTES_KEY)||'[]') }catch(e){return[]} }
+  function saveNotes(notes){ localStorage.setItem(NOTES_KEY, JSON.stringify(notes)); renderNotes(); showToast('Notes saved'); }
+
+  function parseDT(v){ if(!v) return null; const t = new Date(v); return isNaN(t.getTime())? null : t.getTime() }
+  function fmtDT(ms){ if(!ms) return '-'; const d = new Date(ms); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0') }
+
+  // elements
+  const titleI = document.getElementById('title'), startI = document.getElementById('start'), endI = document.getElementById('end');
+  const addBtn = document.getElementById('addBtn'), timeline = document.getElementById('timeline');
+  const clearAll = document.getElementById('clearAll'), delayI = document.getElementById('delay');
+  const delayAllBtn = document.getElementById('delayAll'), delayUpcomingBtn = document.getElementById('delayUpcoming');
+  const toast = document.getElementById('toast');
+  const insertAfter = document.getElementById('insertAfter');
+
+  // notes
+  const noteDate = document.getElementById('noteDate'), noteText = document.getElementById('noteText'), addNoteBtn = document.getElementById('addNote');
+  const notesList = document.getElementById('notesList');
+
+  // notification timeouts register
+  let scheduledTimers = [];
+  let runningCountdown = null; // for 'start' button
+
+  function showToast(msg){ toast.textContent = msg; toast.classList.add('show'); clearTimeout(toast.hideT); toast.hideT = setTimeout(()=> toast.classList.remove('show'), 2200); }
+
+  // ---- rendering ----
+  function render(){
+    const tasks = loadTasks().sort((a,b)=> a.start - b.start);
+    timeline.innerHTML = '';
+    populateInsertSelect(tasks);
+    if(tasks.length===0){ timeline.innerHTML = '<p class="muted">No tasks yet.</p>'; return }
+
+    const nowMs = now();
+    tasks.forEach((t, idx) => {
+      const el = document.createElement('div'); el.className='task';
+      const left = document.createElement('div'); left.className='meta';
+      const main = document.createElement('div');
+      const title = document.createElement('div'); title.textContent = t.title + (t.pinned? ' 🔒' : '');
+      const times = document.createElement('div'); times.className='small muted'; times.textContent = fmtDT(t.start)+' — '+fmtDT(t.end);
+      main.appendChild(title); main.appendChild(times);
+      left.appendChild(main);
+
+      const right = document.createElement('div'); right.className='actions';
+
+      const pinBtn = document.createElement('button'); pinBtn.className='pin'; pinBtn.textContent = t.pinned? 'Unpin' : 'Pin';
+      pinBtn.onclick = ()=>{ togglePin(t.id) };
+
+      const edit = document.createElement('button'); edit.className='ghost'; edit.textContent='Edit';
+      edit.onclick = ()=> openEdit(t.id);
+
+      const del = document.createElement('button'); del.className='danger'; del.textContent='Delete';
+      del.onclick = ()=> deleteTaskWithOptions(t.id);
+
+      const startBtn = document.createElement('button'); startBtn.className='ghost'; startBtn.textContent='Start';
+      startBtn.onclick = ()=> startTaskTimer(t.id);
+
+      // show countdown if running
+      const status = document.createElement('div'); status.className='small';
+      if(t.start <= nowMs && t.end >= nowMs){ // running
+        const remaining = Math.max(0, Math.round((t.end - nowMs)/1000));
+        status.innerHTML = '<span class="countdown">Running — '+formatSeconds(remaining)+'</span>';
+      } else if(t.start > nowMs){
+        const until = Math.max(0, Math.round((t.start - nowMs)/1000));
+        status.textContent = 'Starts in '+formatSeconds(until);
+      } else {
+        status.textContent = 'Finished';
+      }
+
+      right.appendChild(pinBtn);
+      right.appendChild(edit);
+      right.appendChild(startBtn);
+      right.appendChild(del);
+
+      el.appendChild(left);
+      el.appendChild(status);
+      el.appendChild(right);
+      timeline.appendChild(el);
+    });
+  }
+
+  function populateInsertSelect(tasks){
+    insertAfter.innerHTML = '<option value="">(append at end)</option>';
+    tasks.forEach(t=>{
+      const opt = document.createElement('option'); opt.value = t.id; opt.textContent = t.title+' — '+fmtDT(t.start);
+      insertAfter.appendChild(opt);
+    });
+  }
+
+  // ---- CRUD ----
+  function addTask(){
+    const title = titleI.value.trim(); const s = parseDT(startI.value); const e = parseDT(endI.value);
+    if(!title){ alert('Title required'); return }
+    if(!s || !e){ alert('Start and end must be valid'); return }
+    if(e <= s){ alert('End must be after start'); return }
+
+    const tasks = loadTasks().sort((a,b)=> a.start - b.start);
+    const afterId = insertAfter.value;
+    const newTask = { id: uid(), title, start: s, end: e, pinned:false };
+
+    if(!afterId){ // append - but ensure no overlap? just append
+      tasks.push(newTask);
+    } else {
+      // insert after the chosen task id
+      const idx = tasks.findIndex(x=>x.id===afterId);
+      if(idx===-1){ tasks.push(newTask); }
+      else {
+        const prev = tasks[idx];
+        const next = tasks[idx+1];
+        const gap = next ? Math.max(0, next.start - prev.end) : 0;
+        const newDuration = newTask.end - newTask.start;
+        const shift = newDuration + gap;
+        newTask.start = prev.end + gap;
+        newTask.end = newTask.start + newDuration;
+        for(let i = idx+1; i < tasks.length; i++){
+          if(tasks[i].pinned) continue;
+          tasks[i].start += shift; tasks[i].end += shift;
+        }
+        tasks.splice(idx+1,0,newTask);
+      }
+    }
+    saveTasks(tasks);
+    titleI.value=''; startI.value=''; endI.value=''; insertAfter.value='';
+  }
+
+  function deleteTaskWithOptions(id){
+    const tasks = loadTasks().sort((a,b)=> a.start - b.start);
+    const idx = tasks.findIndex(t=>t.id===id); if(idx===-1) return;
+    const keep = confirm('Delete this task?\n\nPress OK to delete and keep other upcoming tasks unchanged. Press Cancel to delete and push later tasks back by the deleted task duration + gap between neighbors.');
+    const removed = tasks.splice(idx,1)[0];
+    if(!keep){
+      const prev = tasks[idx-1] || null; const next = tasks[idx] || null;
+      const removedDur = removed.end - removed.start;
+      const gap = (prev && next) ? Math.max(0, next.start - prev.end) : 0;
+      const shift = removedDur + gap;
+      for(let i = idx; i < tasks.length; i++){
+        if(tasks[i].pinned) continue;
+        tasks[i].start -= shift; tasks[i].end -= shift;
+      }
+    }
+    saveTasks(tasks);
+  }
+
+  function deleteAll(){ if(!confirm('Clear all tasks?')) return; localStorage.removeItem(LS_KEY); render(); showToast('Cleared'); scheduleNotifications(); }
+
+  function openEdit(id){
+    const tasks = loadTasks(); const t = tasks.find(x=>x.id===id); if(!t) return;
+    const newTitle = prompt('Title', t.title); if(newTitle===null) return;
+    const newStart = prompt('Start (ISO local, e.g. 2025-08-12T09:30)', new Date(t.start).toISOString().slice(0,16)); if(newStart===null) return;
+    const newEnd = prompt('End (ISO local, e.g. 2025-08-12T10:30)', new Date(t.end).toISOString().slice(0,16)); if(newEnd===null) return;
+    const s = parseDT(newStart); const e = parseDT(newEnd);
+    if(!s || !e || e<=s){ alert('Invalid times'); return }
+    t.title = newTitle.trim(); t.start = s; t.end = e;
+    saveTasks(tasks);
+  }
+
+  function togglePin(id){ const tasks = loadTasks(); const t = tasks.find(x=>x.id===id); if(!t) return; t.pinned = !t.pinned; saveTasks(tasks); }
+
+  // ---- delay behavior ----
+  function applyDelayToAll(minutes){ const m = parseInt(minutes||'0',10); if(isNaN(m)||m<=0){ alert('Enter minutes > 0'); return };
+    const ms = m*60000; const tasks = loadTasks();
+    for(let t of tasks){ if(t.pinned) continue; t.start += ms; t.end += ms; }
+    saveTasks(tasks); showToast('Applied delay to ALL tasks'); delayI.value=''; }
+
+  function applyDelayToUpcoming(minutes){ const m = parseInt(minutes||'0',10); if(isNaN(m)||m<=0){ alert('Enter minutes > 0'); return };
+    const ms = m*60000; const nowMs = now(); const tasks = loadTasks().sort((a,b)=> a.start - b.start);
+    const runningIdx = tasks.findIndex(t => t.start <= nowMs && t.end >= nowMs);
+    if(runningIdx !== -1){ const running = tasks[runningIdx]; if(!running.pinned) running.end += ms; }
+    for(let t of tasks){ if(t.pinned) continue; if(t.start >= nowMs) { t.start += ms; t.end += ms; } }
+    saveTasks(tasks); showToast('Applied delay to upcoming tasks'); delayI.value=''; }
+
+  // ---- notifications scheduling ----
+  function ensureNotificationPermission(){ if(!('Notification' in window)) return; if(Notification.permission === 'default'){ Notification.requestPermission().then(()=>{}); } }
+
+  function clearScheduled(){ scheduledTimers.forEach(i=> clearTimeout(i)); scheduledTimers = []; }
+
+  function scheduleNotifications(){
+    clearScheduled(); ensureNotificationPermission();
+    const tasks = loadTasks(); const nowMs = now();
+    tasks.forEach(t=>{
+      if(t.pinned) return;
+      // schedule start
+      if(t.start > nowMs){
+        const delay = t.start - nowMs;
+        scheduleClientSideNotification(t.id, 'Task starting: '+t.title, 'Start time reached', t.start);
+      }
+      // schedule end
+      if(t.end > nowMs){
+        scheduleClientSideNotification(t.id + '_end', 'Task ended: '+t.title, 'End time reached', t.end);
+      }
+    });
+  }
+
+  function scheduleClientSideNotification(tag, title, body, timestamp){
+    // Try to ask the service worker to schedule a persistent notification (if browser supports showTrigger)
+    if('serviceWorker' in navigator && navigator.serviceWorker.controller){
+      navigator.serviceWorker.controller.postMessage({cmd:'scheduleNotification', tag, title, body, timestamp});
+      // Also set a fallback in-page timer while the page is open
+      const delay = Math.max(0, timestamp - Date.now());
+      const tid = setTimeout(()=> { notify(title, body); }, delay);
+      scheduledTimers.push(tid);
+    } else {
+      // fallback: simple in-page timer
+      const delay = Math.max(0, timestamp - Date.now());
+      const tid = setTimeout(()=> { notify(title, body); }, delay);
+      scheduledTimers.push(tid);
+    }
+  }
+
+  function notify(title, body){ if('Notification' in window && Notification.permission === 'granted'){ try{ navigator.serviceWorker.getRegistration().then(reg=>{ if(reg && reg.showNotification){ reg.showNotification(title, { body }); } else { new Notification(title, { body }); } }); }catch(e){ new Notification(title, { body }); } } else {
+      showToast(title);
+      try{ if(navigator.vibrate) navigator.vibrate([200,100,200]); }catch(e){}
+    }}
+
+  // ---- start timer for a task (phone timer integration attempt) ----
+  function startTaskTimer(id){
+    const tasks = loadTasks(); const t = tasks.find(x=>x.id===id); if(!t) return; const nowMs = now(); let duration = 0; if(nowMs < t.start) duration = t.end - t.start; else if(nowMs >= t.start && nowMs < t.end) duration = t.end - nowMs; else { alert('Task already finished'); return }
+    if(runningCountdown) { clearInterval(runningCountdown.interval); runningCountdown = null; }
+    const endTs = Date.now() + duration; updateCountdownUI(duration);
+    runningCountdown = { interval: setInterval(()=>{
+      const rem = Math.max(0, Math.round((endTs - Date.now())/1000));
+      updateCountdownUI(rem*1000);
+      if(rem<=0){ clearInterval(runningCountdown.interval); runningCountdown = null; notify('Timer finished for: '+t.title, 'Task timer ended'); showToast('Timer finished'); }
+    }, 1000) };
+
+    // Try to open native phone timer on Android (best-effort). The user can confirm/launch the native timer UI.
+    const secs = Math.round(duration/1000);
+    tryOpenAndroidTimer(secs, t.title);
+    showToast('Timer started in-page; attempted to open native timer (Android).');
+  }
+
+  function updateCountdownUI(ms){ const seconds = Math.round(ms/1000); const text = 'Timer: '+formatSeconds(seconds); toast.textContent = text; toast.classList.add('show'); clearTimeout(toast.hideT); toast.hideT = setTimeout(()=> toast.classList.remove('show'), 4000); }
+
+  function formatSeconds(sec){ if(sec<60) return sec+'s'; const m = Math.floor(sec/60); const s = sec%60; return m+'m '+String(s).padStart(2,'0')+'s'; }
+
+  // Try to open Android native timer using an intent URL (works on Chrome Android in many devices).
+  function tryOpenAndroidTimer(seconds, label){
+    if(!seconds || seconds<=0) return;
+    const encodedLabel = encodeURIComponent(label || 'Timer');
+    // Build an Android intent that asks the clock app to set a timer. This works on many Android devices/Chrome.
+    const intent = `intent:#Intent;action=android.intent.action.SET_TIMER;S.android.intent.extra.MESSAGE=${encodedLabel};S.android.intent.extra.LENGTH=${seconds};end`;
+    // Also attempt a more modern approach using the web-share or alarms? (no standard)
+    // Attempt to open intent - this will prompt user to choose a clock app on Android.
+    try{
+      window.location.href = intent;
+      // Note: on non-Android or unsupported browsers this will likely do nothing.
+    }catch(e){
+      console.warn('Failed to open Android intent for timer', e);
+    }
+  }
+
+  // ---- notes ----
+  function renderNotes(){ const notes = loadNotes().sort((a,b)=> a.date.localeCompare(b.date)); notesList.innerHTML=''; if(notes.length===0){ notesList.innerHTML='<p class="muted">No notes yet.</p>'; return }
+    for(let n of notes){ const r = document.createElement('div'); r.className='note-row'; r.innerHTML = '<div style="width:140px">'+n.date+'</div><div style="flex:1">'+escapeHtml(n.text)+'</div><div><button class="ghost">Delete</button></div>';
+      r.querySelector('button').onclick = ()=>{ if(confirm('Delete note?')){ const arr = loadNotes().filter(x=> x.id !== n.id); saveNotes(arr); } };
+      notesList.appendChild(r);
+    }
+  }
+
+  function escapeHtml(s){ return (s+'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  // ---- helpers ----
+  function startUp(){ render(); renderNotes(); scheduleNotifications(); ensureNotificationPermission(); registerSW(); }
+
+  function formatISOLocal(ms){ const d = new Date(ms); return d.toISOString().slice(0,16); }
+
+  // UI hooks
+  addBtn.addEventListener('click', addTask);
+  clearAll.addEventListener('click', deleteAll);
+  delayAllBtn.addEventListener('click', ()=> applyDelayToAll(delayI.value));
+  delayUpcomingBtn.addEventListener('click', ()=> applyDelayToUpcoming(delayI.value));
+
+  // note hooks
+  addNoteBtn.addEventListener('click', ()=>{
+    const date = noteDate.value; const text = noteText.value.trim(); if(!date || !text){ alert('Pick date and write a note'); return }
+    const notes = loadNotes(); notes.push({ id: uid(), date, text }); saveNotes(notes); noteText.value='';
+  });
+
+  document.addEventListener('visibilitychange', ()=> { if(!document.hidden) scheduleNotifications(); });
+  window.addEventListener('beforeunload', ()=> { saveTasks(loadTasks()); });
+
+  // Service worker registration & messaging
+  async function registerSW(){
+    if('serviceWorker' in navigator){
+      try{
+        const reg = await navigator.serviceWorker.register('service-worker.js');
+        console.log('SW registered', reg);
+        // Ask permission early
+        if(Notification && Notification.permission === 'default') await Notification.requestPermission();
+      }catch(e){ console.warn('SW register failed', e); }
+    }
+  }
+
+  // initial
+  startUp();
+
+  // expose some functions for debugging in console (optional)
+  window.__timeline = { loadTasks, saveTasks, applyDelayToAll, applyDelayToUpcoming, scheduleNotifications };
+
+
+  // ---- Trigger API helpers (Option 3) ----
+  async function checkTriggerSupport(){
+    let support = false;
+    // Heuristic: TimestampTrigger may exist in global scope; also check if ServiceWorkerRegistration.prototype.showNotification accepts showTrigger option
+    try{
+      support = (typeof TimestampTrigger !== 'undefined') || !!(window.TimestampTrigger);
+    }catch(e){}
+    // Try to detect via service worker registration features
+    if('serviceWorker' in navigator){
+      try{
+        const reg = await navigator.serviceWorker.getRegistration();
+        if(reg && 'showNotification' in reg){
+          // Can't conclusively detect showTrigger without trying, but assume support if TimestampTrigger exists
+        }
+      }catch(e){}
+    }
+    return support;
+  }
+
+  async function updateTriggerStatusUI(){
+    const s = await checkTriggerSupport();
+    document.getElementById('triggerStatus').textContent = 'Support: ' + (s ? 'Probably yes (TimestampTrigger available)' : 'No / Unknown — fallback only');
+    return s;
+  }
+
+  async function scheduleAllTriggers(){
+    const tasks = loadTasks();
+    if(tasks.length===0){ alert('No tasks to schedule'); return; }
+    // Ensure SW is ready
+    if(!('serviceWorker' in navigator)){ alert('Service worker not supported in this browser'); return; }
+    const reg = await navigator.serviceWorker.ready;
+    // Request notification permission
+    if('Notification' in window && Notification.permission !== 'granted'){
+      await Notification.requestPermission();
+    }
+    for(const t of tasks){
+      if(t.pinned) continue;
+      // post message to SW to schedule using showTrigger if possible
+      reg.active && reg.active.postMessage({ cmd: 'scheduleNotificationTrigger', id: t.id, title: 'Task starting: ' + t.title, body: '', timestamp: t.start });
+      reg.active && reg.active.postMessage({ cmd: 'scheduleNotificationTrigger', id: t.id + '_end', title: 'Task ended: ' + t.title, body: '', timestamp: t.end });
+    }
+    showToast('Requested scheduling to service worker (best-effort).');
+  }
+
+  async function cancelAllSWScheduled(){
+    if(!('serviceWorker' in navigator)){ alert('Service worker not supported'); return; }
+    const reg = await navigator.serviceWorker.ready;
+    reg.active && reg.active.postMessage({ cmd: 'cancelAllScheduled' });
+    showToast('Cancel request sent to service worker.');
+  }
+
+  // Wire UI buttons
+  document.getElementById('btnCheckTrigger').addEventListener('click', async ()=>{ const ok = await updateTriggerStatusUI(); if(ok) alert('Your browser likely supports TimestampTrigger (experimental).'); else alert('No TimestampTrigger detected — the app will use fallback timers while page/SW is alive.'); });
+  document.getElementById('btnScheduleTriggers').addEventListener('click', scheduleAllTriggers);
+  document.getElementById('btnCancelTriggers').addEventListener('click', cancelAllSWScheduled);
+
+  // Update status on load
+  updateTriggerStatusUI();
+
+})();
+</script>
+<script src="/enhancements.js" defer></script>
+</body>
+</html>
